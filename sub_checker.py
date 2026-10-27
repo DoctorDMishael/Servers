@@ -471,9 +471,9 @@ def run_checks(nodes, ctx):
 
 # ---------------------------------------------------------------- Cloudflare KV
 def kv_api(method, data=None):
-    account = os.environ["CF_ACCOUNT_ID"]
-    ns = os.environ["CF_KV_NAMESPACE_ID"]
-    token = os.environ["CF_API_TOKEN"]
+    account = os.environ["CF_ACCOUNT_ID"].strip()
+    ns = os.environ["CF_KV_NAMESPACE_ID"].strip()
+    token = os.environ["CF_API_TOKEN"].strip()
     url = f"https://api.cloudflare.com/client/v4/accounts/{account}/storage/kv/namespaces/{ns}/values/sub.txt"
     headers = {"Authorization": f"Bearer {token}"}
     if method == "GET":
