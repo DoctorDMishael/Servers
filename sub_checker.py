@@ -552,9 +552,12 @@ def kv_api(method, data=None):
 # ---------------------------------------------------------------- основной процесс
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--no-upload", action="store_true", help="локально: записать out/sub.txt")
     args = ap.parse_args()
     S = load_settings()
+    if args.selftest:
+        return selftest(S)
 
     start = time.monotonic()
     deadline = start + S["global_deadline_sec"]
