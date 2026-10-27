@@ -1,5 +1,4 @@
-// Отдаёт подписку только по пути /<SUB_TOKEN> (Base64) или /<SUB_TOKEN>/plain (обычный текст).
-// Только чтение: у Worker нет операций записи в R2.
+// Отдаёт подписку из Workers KV по пути /<SUB_TOKEN> (Base64) или /<SUB_TOKEN>/plain (обычный текст).
 const enc = new TextEncoder();
 
 async function safeEqual(a, b) {
@@ -33,10 +32,9 @@ export default {
     const pathOk = parts.length === 1 || (parts.length === 2 && parts[1] === "plain");
     if (!tokenOk || !pathOk) return deny();
 
-    const obj = await env.BUCKET.get("sub.txt");
-    if (!obj) return new Response("Subscription not ready", { status: 503, headers: { "Cache-Control": "no-store" } });
+    const text = await env.KV.get("sub.txt");
+    if (!text) return new Response("Subscription not ready", { status: 503, headers: { "Cache-Control": "no-store" } });
 
-    const text = await obj.text();
     const body = parts[1] === "plain" ? text : toBase64(text);
     const headers = {
       "Content-Type": "text/plain; charset=utf-8",
@@ -44,8 +42,6 @@ export default {
       "X-Content-Type-Options": "nosniff",
       "X-Robots-Tag": "noindex",
       "Profile-Update-Interval": "2",
-      "Last-Modified": obj.uploaded.toUTCString(),
-      "X-Updated-At": (obj.customMetadata && obj.customMetadata.updated_at) || "",
     };
     return new Response(request.method === "HEAD" ? null : body, { status: 200, headers });
   },
