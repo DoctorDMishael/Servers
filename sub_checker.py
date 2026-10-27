@@ -319,7 +319,6 @@ def resolve_all(hosts):
 # ---------------------------------------------------------------- Авто-поиск бесплатного прокси в РФ
 def find_free_russian_proxy(geo):
     print("Ищу бесплатный российский прокси для проверки...")
-    # Публичные списки SOCKS5
     urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
@@ -333,7 +332,6 @@ def find_free_russian_proxy(geo):
             pass
 
     random.shuffle(proxies)
-    # Берем первые 100 прокси для проверки
     for p in proxies[:100]:
         parts = p.strip().split(":")
         if len(parts) != 2: continue
@@ -342,7 +340,6 @@ def find_free_russian_proxy(geo):
         if geo.country(ip) != "RU":
             continue
             
-        # Проверяем, жив ли прокси (быстрый тест)
         try:
             test_url = "https://api.ipify.org?format=json"
             r = requests.get(test_url, proxies={"http": f"socks5://{ip}:{port}", "https": f"socks5://{ip}:{port}"}, timeout=5)
@@ -549,6 +546,34 @@ def kv_api(method, data=None):
         r.raise_for_status()
 
 
+# ---------------------------------------------------------------- самопроверка
+def selftest(S):
+    print("SELFTEST: проверяю, что нерабочий прокси не проходит за счёт прямого выхода")
+    d = direct_ip(S)
+    if not d:
+        print("SELFTEST FAIL: нет прямого доступа в интернет с раннера, тест бессмыслен")
+        return 1
+    tmp = tempfile.mkdtemp()
+    try:
+        geo = load_geo(tmp)
+        ctx = Ctx(S, geo, d, tmp, time.monotonic() + 300)
+        bad = [{"type": "shadowsocks", "server": "127.0.0.1", "server_port": 9, "method": "aes-256-gcm", "password": "x"},
+               {"type": "shadowsocks", "server": "192.0.2.1", "server_port": 8388, "method": "aes-256-gcm", "password": "x"}]
+        ok = True
+        for i, ob in enumerate(bad, 1):
+            n = Node("", ob, str(i), ob["server"], "shadowsocks")
+            st = check_node(n, BASE_PORT, ctx)["status"]
+            print(f"  мёртвый узел #{i}: статус={st} (ожидается failed)")
+            ok &= st == "failed"
+        r = probe(S["targets"][0], {"http": "socks5h://127.0.0.1:1", "https": "socks5h://127.0.0.1:1"}, 5)
+        print(f"  запрос через закрытый прокси-порт: ok={r['ok']} (ожидается False)")
+        ok &= not r["ok"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("SELFTEST OK" if ok else "SELFTEST FAIL")
+    return 0 if ok else 1
+
+
 # ---------------------------------------------------------------- основной процесс
 def main():
     ap = argparse.ArgumentParser()
@@ -601,7 +626,6 @@ def main():
 
         geo = load_geo(tmp)
         
-        # Ищем бесплатный российский прокси, если он не задан вручную
         if not S.get("russian_relay"):
             relay = find_free_russian_proxy(geo)
             if relay:
@@ -641,7 +665,6 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         
-        # Фильтрация дубликатов по IP
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
         seen_ips = set()
         unique_good = []
