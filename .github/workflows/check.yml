@@ -1,0 +1,58 @@
+name: check-subscriptions
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Опубликовать даже при резком сокращении списка"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-subscriptions
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SINGBOX_VERSION: "1.12.0"
+      FORCE_PUBLISH: ${{ inputs.force && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install sing-box
+        run: |
+          set -euo pipefail
+          url="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o /tmp/sing-box.tar.gz
+          tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          install -m 0755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Self-test (только при ручном запуске)
+        if: github.event_name == 'workflow_dispatch'
+        run: python sub_checker.py --selftest
+
+      - name: Run checker
+        env:
+          SUBSCRIPTION_URLS: ${{ secrets.SUBSCRIPTION_URLS }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: python sub_checker.py
