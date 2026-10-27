@@ -1,0 +1,4 @@
+requests>=2.32,<3
+PySocks>=1.7.1,<2
+maxminddb>=2.6,<3
+boto3>=1.36,<2
