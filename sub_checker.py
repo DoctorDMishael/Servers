@@ -32,7 +32,6 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SINGBOX = os.environ.get("SINGBOX_BIN", "sing-box")
 BASE_PORT = 20800
 UA = "Mozilla/5.0 (compatible; sub-checker/1.0)"
-OBJECT_KEY = "sub.txt"
 Node = namedtuple("Node", "link ob key host proto")
 
 
@@ -250,7 +249,7 @@ def fetch_sources(urls, S):
                             raise ValueError("too_big")
                 text = data.decode("utf-8", "replace")
                 break
-            except Exception as e:  # только имя класса: текст ошибки может содержать URL
+            except Exception as e:
                 err = type(e).__name__
         if text is None:
             errs[f"источник #{i}: {err}"] += 1
@@ -294,7 +293,7 @@ def load_geo(tmp):
             with open(path, "wb") as f:
                 f.write(gzip.decompress(r.content))
             g = Geo(path)
-            if g.country("8.8.8.8") == "US" and g.country("77.88.8.8") == "RU":  # проверка базы
+            if g.country("8.8.8.8") == "US" and g.country("77.88.8.8") == "RU":
                 return g
         except Exception:
             continue
@@ -323,7 +322,6 @@ def core_config(ob, port, user, pw):
         "dns": {"servers": [{"type": "local", "tag": "local"}]},
         "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": port,
                       "users": [{"username": user, "password": pw}]}],
-        # единственный outbound: прямого выхода и запасных узлов в конфиге нет
         "outbounds": [dict(ob, tag="out", domain_resolver="local")],
         "route": {"rules": [{"inbound": ["in"], "action": "route", "outbound": "out"}, {"action": "reject"}],
                   "final": "out", "default_domain_resolver": "local"},
@@ -380,7 +378,6 @@ def parse_target(kind, text):
 
 
 def probe(target, proxies, timeout):
-    """Один HTTPS-запрос (с проверкой сертификата) к контрольному адресу."""
     t0 = time.perf_counter()
     try:
         r = requests.get(target["url"], proxies=proxies, timeout=timeout, verify=True,
@@ -432,7 +429,7 @@ def check_node(n, port, ctx):
                         ctx.target_ok[t["name"]] += r["ok"]
                 good = [r for r in res if r["ok"]]
                 if ctx.direct and any(r["ip"] == ctx.direct for r in good):
-                    return {"status": "leak"}  # выходной IP = IP раннера: трафик шёл мимо прокси
+                    return {"status": "leak"}
                 if len(good) >= need:
                     ok_rounds += 1
                     times += [r["ms"] for r in good]
@@ -472,24 +469,22 @@ def run_checks(nodes, ctx):
         return dict(ex.map(work, nodes))
 
 
-# ---------------------------------------------------------------- R2
-def s3_client():
-    import boto3
-    from botocore.config import Config
-    return boto3.client(
-        "s3", endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-        region_name="auto",
-        config=Config(signature_version="s3v4", retries={"max_attempts": 3},
-                      request_checksum_calculation="when_required", response_checksum_validation="when_required"))
-
-
-def read_prev(s3, bucket):
-    try:
-        o = s3.get_object(Bucket=bucket, Key=OBJECT_KEY)
-    except s3.exceptions.NoSuchKey:
-        return []
-    return [x.strip() for x in o["Body"].read().decode("utf-8", "replace").splitlines() if x.strip()]
+# ---------------------------------------------------------------- Cloudflare KV
+def kv_api(method, data=None):
+    account = os.environ["CF_ACCOUNT_ID"]
+    ns = os.environ["CF_KV_NAMESPACE_ID"]
+    token = os.environ["CF_API_TOKEN"]
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account}/storage/kv/namespaces/{ns}/values/sub.txt"
+    headers = {"Authorization": f"Bearer {token}"}
+    if method == "GET":
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 404:
+            return []
+        r.raise_for_status()
+        return [x.strip() for x in r.text.splitlines() if x.strip()]
+    elif method == "PUT":
+        r = requests.put(url, headers=headers, data=data.encode("utf-8"), timeout=30)
+        r.raise_for_status()
 
 
 # ---------------------------------------------------------------- самопроверка
@@ -511,7 +506,6 @@ def selftest(S):
             st = check_node(n, BASE_PORT, ctx)["status"]
             print(f"  мёртвый узел #{i}: статус={st} (ожидается failed)")
             ok &= st == "failed"
-        # прокси-порт без сервера: запрос не должен уйти напрямую
         r = probe(S["targets"][0], {"http": "socks5h://127.0.0.1:1", "https": "socks5h://127.0.0.1:1"}, 5)
         print(f"  запрос через закрытый прокси-порт: ok={r['ok']} (ожидается False)")
         ok &= not r["ok"]
@@ -525,7 +519,7 @@ def selftest(S):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--no-upload", action="store_true", help="локально: записать out/sub.txt вместо загрузки в R2")
+    ap.add_argument("--no-upload", action="store_true", help="локально: записать out/sub.txt")
     args = ap.parse_args()
     S = load_settings()
     if args.selftest:
@@ -538,12 +532,10 @@ def main():
         print("Нет ссылок в SUBSCRIPTION_URLS")
         return 1
     tmp = tempfile.mkdtemp()
-    s3 = bucket = None
     try:
         prev_lines = []
         if not args.no_upload:
-            s3, bucket = s3_client(), os.environ["R2_BUCKET"]
-            prev_lines = read_prev(s3, bucket)
+            prev_lines = kv_api("GET")
         prev_keys = set()
         for ln in prev_lines:
             try:
@@ -589,7 +581,7 @@ def main():
 
         d = direct_ip(S)
         if not d:
-            print("Предупреждение: не удалось получить прямой IP раннера, защита «выход = IP раннера» отключена")
+            print("Предупреждение: не удалось получить прямой IP раннера, защита отключена")
         ctx = Ctx(S, geo, d, tmp, deadline)
         results = run_checks(nodes, ctx)
 
@@ -608,7 +600,6 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
-        # итоговый отчёт (только счётчики)
         report = [
             f"Получено: {rep['received']}",
             f"Дубликатов: {rep['duplicates']}",
@@ -650,9 +641,7 @@ def main():
             with open(os.path.join(ROOT, "out", "sub.b64"), "w") as f:
                 f.write(base64.b64encode(text.encode()).decode())
         else:
-            s3.put_object(Bucket=bucket, Key=OBJECT_KEY, Body=text.encode("utf-8"),
-                          ContentType="text/plain; charset=utf-8",
-                          Metadata={"updated_at": updated, "count": str(len(good))})
+            kv_api("PUT", text)
         print(f"Обновлено: {updated}")
         return 0
     finally:
