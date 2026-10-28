@@ -318,7 +318,7 @@ def resolve_all(hosts):
 
 # ---------------------------------------------------------------- Авто-поиск бесплатного прокси в РФ
 def find_free_russian_proxy(geo, S):
-    print("Ищу бесплатный российский прокси для проверки...")
+    print("Ищу бесплатный российский прокси для проверки (макс. 30 шт для экономии времени)...")
     urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
         "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
@@ -332,8 +332,12 @@ def find_free_russian_proxy(geo, S):
             pass
 
     random.shuffle(proxies)
-    # Берем первые 150 прокси для проверки
-    for p in proxies[:150]:
+    checked = 0
+    
+    for p in proxies:
+        if checked >= 30: # Ограничиваем поиск, чтобы не тратить время
+            break
+            
         parts = p.strip().split(":")
         if len(parts) != 2: continue
         ip, port = parts
@@ -341,14 +345,14 @@ def find_free_russian_proxy(geo, S):
         if geo.country(ip) != "RU":
             continue
             
+        checked += 1
         proxy_url = f"socks5://{ip}:{port}"
         test_proxies = {"http": proxy_url, "https": proxy_url}
         
         try:
-            # ЖЕСТКАЯ ПРОВЕРКА: может ли прокси открыть наши контрольные сайты?
             all_ok = True
             for t in S["targets"]:
-                r = requests.get(t["url"], proxies=test_proxies, timeout=5, headers={"User-Agent": UA})
+                r = requests.get(t["url"], proxies=test_proxies, timeout=3, headers={"User-Agent": UA}) # Уменьшили таймаут до 3 сек
                 if r.status_code != 200 or parse_target(t["parser"], r.text) is None:
                     all_ok = False
                     break
@@ -359,7 +363,7 @@ def find_free_russian_proxy(geo, S):
         except Exception:
             pass
             
-    print("Не удалось найти рабочий российский прокси. Проверка будет прямой.")
+    print("Не удалось найти рабочий российский прокси.")
     return ""
 
 
@@ -645,7 +649,7 @@ def main():
                 print("КРИТИЧЕСКАЯ ОШИБКА: Не найден ни один рабочий прокси в РФ.")
                 print("Публикация отменена, чтобы не выдать клиентам нерабочие сервера.")
                 print("Будет сохранен предыдущий список серверов.")
-                return 1
+                return 0 # ВАЖНО: возвращаем 0, чтобы GitHub не отключил расписание за частые падения
 
         resolved = resolve_all({n.host for n in nodes})
         country_cnt, keep = Counter(), []
@@ -722,11 +726,12 @@ def main():
         ok_text = len(good) >= max(1, S["min_nodes_to_publish"]) and all(LINK_RE.match(x) for x in text.split("\n") if x)
         if not ok_text:
             print("Результат пуст или некорректен — прежняя подписка сохранена")
-            return 1
+            return 0 # ВАЖНО: тоже 0, чтобы не ломать расписание
+
         if prev_count and len(good) < prev_count * S["shrink_threshold"] and not force:
             print(f"Список сократился слишком резко ({len(good)} из {prev_count}) — прежняя подписка сохранена. "
                   "Для принудительной публикации запустите вручную с force=true")
-            return 1
+            return 0
 
         updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if args.no_upload:
