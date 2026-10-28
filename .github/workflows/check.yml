@@ -2,7 +2,7 @@ name: check-subscriptions
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       force:
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       SINGBOX_VERSION: "1.12.0"
       FORCE_PUBLISH: ${{ inputs.force && '1' || '0' }}
