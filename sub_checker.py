@@ -317,7 +317,7 @@ def resolve_all(hosts):
 
 
 # ---------------------------------------------------------------- Авто-поиск бесплатного прокси в РФ
-def find_free_russian_proxy(geo):
+def find_free_russian_proxy(geo, S):
     print("Ищу бесплатный российский прокси для проверки...")
     urls = [
         "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
@@ -332,7 +332,8 @@ def find_free_russian_proxy(geo):
             pass
 
     random.shuffle(proxies)
-    for p in proxies[:100]:
+    # Берем первые 150 прокси для проверки
+    for p in proxies[:150]:
         parts = p.strip().split(":")
         if len(parts) != 2: continue
         ip, port = parts
@@ -340,14 +341,24 @@ def find_free_russian_proxy(geo):
         if geo.country(ip) != "RU":
             continue
             
+        proxy_url = f"socks5://{ip}:{port}"
+        test_proxies = {"http": proxy_url, "https": proxy_url}
+        
         try:
-            test_url = "https://api.ipify.org?format=json"
-            r = requests.get(test_url, proxies={"http": f"socks5://{ip}:{port}", "https": f"socks5://{ip}:{port}"}, timeout=5)
-            if r.status_code == 200:
+            # ЖЕСТКАЯ ПРОВЕРКА: может ли прокси открыть наши контрольные сайты?
+            all_ok = True
+            for t in S["targets"]:
+                r = requests.get(t["url"], proxies=test_proxies, timeout=5, headers={"User-Agent": UA})
+                if r.status_code != 200 or parse_target(t["parser"], r.text) is None:
+                    all_ok = False
+                    break
+            
+            if all_ok:
                 print(f"Найден рабочий прокси: {ip}:{port}")
-                return f"socks5://{ip}:{port}"
+                return proxy_url
         except Exception:
             pass
+            
     print("Не удалось найти рабочий российский прокси. Проверка будет прямой.")
     return ""
 
@@ -627,9 +638,14 @@ def main():
         geo = load_geo(tmp)
         
         if not S.get("russian_relay"):
-            relay = find_free_russian_proxy(geo)
+            relay = find_free_russian_proxy(geo, S)
             if relay:
                 S["russian_relay"] = relay
+            else:
+                print("КРИТИЧЕСКАЯ ОШИБКА: Не найден ни один рабочий прокси в РФ.")
+                print("Публикация отменена, чтобы не выдать клиентам нерабочие сервера.")
+                print("Будет сохранен предыдущий список серверов.")
+                return 1
 
         resolved = resolve_all({n.host for n in nodes})
         country_cnt, keep = Counter(), []
