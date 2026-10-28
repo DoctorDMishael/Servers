@@ -45,8 +45,7 @@ DEFAULTS = {
     "timeout_sec": 8, "attempts": 3, "min_success_attempts": 2, "max_concurrency": 5,
     "min_targets_ok": 1, "targets": [], "blocked_protocols": [], "blocked_countries": ["RU"],
     "global_deadline_sec": 240, "min_nodes_to_publish": 1, "shrink_threshold": 0.5,
-    "shrink_retries": 1, "fetch_timeout_sec": 20, "max_source_bytes": 20000000,
-    "russian_relay": ""
+    "shrink_retries": 1, "fetch_timeout_sec": 20, "max_source_bytes": 20000000
 }
 
 
@@ -316,97 +315,24 @@ def resolve_all(hosts):
         return dict(ex.map(one, hosts))
 
 
-# ---------------------------------------------------------------- Авто-поиск бесплатного прокси в РФ
-def find_free_russian_proxy(geo, S):
-    print("Ищу бесплатный российский прокси для проверки (макс. 30 шт для экономии времени)...")
-    urls = [
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
-    ]
-    proxies = []
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=10)
-            proxies.extend(r.text.splitlines())
-        except Exception:
-            pass
-
-    random.shuffle(proxies)
-    checked = 0
-    
-    for p in proxies:
-        if checked >= 30: # Ограничиваем поиск, чтобы не тратить время
-            break
-            
-        parts = p.strip().split(":")
-        if len(parts) != 2: continue
-        ip, port = parts
-        
-        if geo.country(ip) != "RU":
-            continue
-            
-        checked += 1
-        proxy_url = f"socks5://{ip}:{port}"
-        test_proxies = {"http": proxy_url, "https": proxy_url}
-        
-        try:
-            all_ok = True
-            for t in S["targets"]:
-                r = requests.get(t["url"], proxies=test_proxies, timeout=3, headers={"User-Agent": UA}) # Уменьшили таймаут до 3 сек
-                if r.status_code != 200 or parse_target(t["parser"], r.text) is None:
-                    all_ok = False
-                    break
-            
-            if all_ok:
-                print(f"Найден рабочий прокси: {ip}:{port}")
-                return proxy_url
-        except Exception:
-            pass
-            
-    print("Не удалось найти рабочий российский прокси.")
-    return ""
-
-
 # ---------------------------------------------------------------- ядро и проверка
-def core_config(ob, port, user, pw, S):
-    outbounds = []
-    relay_url = S.get("russian_relay", "").strip()
-    
-    if relay_url:
-        u = urlsplit(relay_url)
-        relay_ob = {
-            "type": "socks",
-            "tag": "relay",
-            "server": u.hostname,
-            "server_port": u.port
-        }
-        if u.username:
-            relay_ob["username"] = unquote(u.username)
-            relay_ob["password"] = unquote(u.password)
-        outbounds.append(relay_ob)
-        target_ob = dict(ob)
-        target_ob["dialer"] = {"detour": "relay"}
-    else:
-        target_ob = dict(ob)
-        
-    outbounds.append(dict(target_ob, tag="out", domain_resolver="local"))
-
+def core_config(ob, port, user, pw):
     return {
         "log": {"level": "fatal"},
         "dns": {"servers": [{"type": "local", "tag": "local"}]},
         "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": port,
                       "users": [{"username": user, "password": pw}]}],
-        "outbounds": outbounds,
+        "outbounds": [dict(ob, tag="out", domain_resolver="local")],
         "route": {"rules": [{"inbound": ["in"], "action": "route", "outbound": "out"}, {"action": "reject"}],
                   "final": "out", "default_domain_resolver": "local"},
     }
 
 
-def start_core(ob, port, tmp, user, pw, S):
+def start_core(ob, port, tmp, user, pw):
     cfg = os.path.join(tmp, f"c{port}.json")
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump(core_config(ob, port, user, pw, S), f)
+        json.dump(core_config(ob, port, user, pw), f)
     proc = subprocess.Popen([SINGBOX, "run", "-c", cfg], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0, err = time.monotonic(), "core_start_timeout"
@@ -487,7 +413,7 @@ class Ctx:
 
 def check_node(n, port, ctx):
     S = ctx.S
-    proc, err = start_core(n.ob, port, ctx.tmp, ctx.user, ctx.pw, S)
+    proc, err = start_core(n.ob, port, ctx.tmp, ctx.user, ctx.pw)
     if err:
         return {"status": "core_rejected", "why": err}
     proxy = f"socks5h://{ctx.user}:{ctx.pw}@127.0.0.1:{port}"
@@ -640,17 +566,6 @@ def main():
         nodes = keep
 
         geo = load_geo(tmp)
-        
-        if not S.get("russian_relay"):
-            relay = find_free_russian_proxy(geo, S)
-            if relay:
-                S["russian_relay"] = relay
-            else:
-                print("КРИТИЧЕСКАЯ ОШИБКА: Не найден ни один рабочий прокси в РФ.")
-                print("Публикация отменена, чтобы не выдать клиентам нерабочие сервера.")
-                print("Будет сохранен предыдущий список серверов.")
-                return 0 # ВАЖНО: возвращаем 0, чтобы GitHub не отключил расписание за частые падения
-
         resolved = resolve_all({n.host for n in nodes})
         country_cnt, keep = Counter(), []
         for n in nodes:
@@ -685,6 +600,7 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         
+        # Фильтрация дубликатов по IP
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
         seen_ips = set()
         unique_good = []
@@ -708,11 +624,7 @@ def main():
         ]
         details = [f"  не поддерживается — {k}: {v}" for k, v in sorted(unsupported.items())]
         details += [f"  {k}" for k in src_errs]
-        if S.get("russian_relay"):
-            details.append(f"  Проверка выполнена через прокси: {S['russian_relay']}")
-        else:
-            details.append("  ВНИМАНИЕ: проверка выполнена напрямую (без прокси РФ)")
-
+        
         for t in S["targets"]:
             if nodes and ctx.target_ok[t["name"]] == 0 and any(r["status"] != "not_checked" for r in results.values()):
                 details.append(f"  ВНИМАНИЕ: контрольный адрес «{t['name']}» не ответил ни разу")
@@ -726,7 +638,7 @@ def main():
         ok_text = len(good) >= max(1, S["min_nodes_to_publish"]) and all(LINK_RE.match(x) for x in text.split("\n") if x)
         if not ok_text:
             print("Результат пуст или некорректен — прежняя подписка сохранена")
-            return 0 # ВАЖНО: тоже 0, чтобы не ломать расписание
+            return 0
 
         if prev_count and len(good) < prev_count * S["shrink_threshold"] and not force:
             print(f"Список сократился слишком резко ({len(good)} из {prev_count}) — прежняя подписка сохранена. "
