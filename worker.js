@@ -1,4 +1,3 @@
-// Отдаёт подписку из Workers KV по пути /<SUB_TOKEN> (Base64) или /<SUB_TOKEN>/plain (обычный текст).
 const enc = new TextEncoder();
 
 async function safeEqual(a, b) {
@@ -21,26 +20,49 @@ function toBase64(text) {
   return btoa(s);
 }
 
-const deny = () => new Response("Not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+const deny = (msg) => new Response(msg, { status: 403, headers: { "Cache-Control": "no-store" } });
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "GET" && request.method !== "HEAD") return deny();
+    if (request.method !== "GET" && request.method !== "HEAD") return deny("Method not allowed");
     const parts = new URL(request.url).pathname.split("/").filter(Boolean);
-    const secret = env.SUB_TOKEN || "";
-    const tokenOk = secret.length >= 32 && (await safeEqual(parts[0] || "", secret));
+    const token = parts[0] || "";
+    
+    if (!token) return deny("Not found");
+
+    let isAuthorized = false;
+
+    // 1. Проверяем, не является ли это ТВОИМ ЛИЧНЫМ токеном (VIP-пропуск)
+    const adminToken = env.ADMIN_TOKEN || "";
+    if (adminToken.length >= 32 && (await safeEqual(token, adminToken))) {
+        isAuthorized = true;
+    } else {
+        // 2. Если это не ты, проверяем базу клиентов и дату
+        const expireDateStr = await env.KV.get(`token_${token}`);
+        if (expireDateStr) {
+            const expireDate = new Date(expireDateStr);
+            const today = new Date();
+            if (today <= expireDate) {
+                isAuthorized = true;
+            } else {
+                return deny("Ваша подписка истекла! Продлите её в Telegram-боте.");
+            }
+        } else {
+            return deny("Ошибка: Неверная ссылка. Купите подписку в боте.");
+        }
+    }
+
+    // 3. Если доступ разрешен (тобой или оплатившим клиентом), отдаем сервера
     const pathOk = parts.length === 1 || (parts.length === 2 && parts[1] === "plain");
-    if (!tokenOk || !pathOk) return deny();
+    if (!pathOk) return deny("Not found");
 
     const text = await env.KV.get("sub.txt");
-    if (!text) return new Response("Subscription not ready", { status: 503, headers: { "Cache-Control": "no-store" } });
+    if (!text) return new Response("Подписка временно обновляется", { status: 503 });
 
     const body = parts[1] === "plain" ? text : toBase64(text);
     const headers = {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "X-Robots-Tag": "noindex",
       "Profile-Update-Interval": "2",
     };
     return new Response(request.method === "HEAD" ? null : body, { status: 200, headers });
