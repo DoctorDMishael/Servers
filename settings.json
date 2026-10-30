@@ -16,5 +16,5 @@
   "shrink_retries": 1,
   "fetch_timeout_sec": 20,
   "max_source_bytes": 20000000,
-  "use_proxy": true
+  "use_proxy": false
 }
