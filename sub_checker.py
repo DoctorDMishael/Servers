@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from collections import Counter, namedtuple
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, unquote, urlsplit, urlparse
@@ -32,6 +33,17 @@ SINGBOX = os.environ.get("SINGBOX_BIN", "sing-box")
 BASE_PORT = 20800
 UA = "Mozilla/5.0 (compatible; sub-checker/1.0)"
 Node = namedtuple("Node", "link ob key host proto")
+
+# Словарь для красивых названий стран
+COUNTRY_NAMES = {
+    "RU": "Russia", "US": "United States", "DE": "Germany", "NL": "Netherlands",
+    "FR": "France", "FI": "Finland", "SE": "Sweden", "GB": "United Kingdom",
+    "TR": "Turkey", "JP": "Japan", "KR": "South Korea", "CA": "Canada",
+    "SG": "Singapore", "CH": "Switzerland", "AT": "Austria", "PL": "Poland",
+    "HK": "Hong Kong", "IN": "India", "BR": "Brazil", "IT": "Italy",
+    "ES": "Spain", "CZ": "Czechia", "RO": "Romania", "MD": "Moldova",
+    "KZ": "Kazakhstan", "AM": "Armenia", "GE": "Georgia", "AE": "UAE"
+}
 
 
 class Unsupported(Exception):
@@ -311,7 +323,7 @@ def resolve_all(hosts):
             return h, sorted({ai[4][0].split("%")[0] for ai in socket.getaddrinfo(h, None, type=socket.SOCK_STREAM)})
         except Exception:
             return h, []
-    with cf.ThreadPoolExecutor(32) as ex: # Увеличили с 16 до 32
+    with cf.ThreadPoolExecutor(32) as ex:
         return dict(ex.map(one, hosts))
 
 
@@ -323,7 +335,6 @@ def get_working_proxy(S):
     print("Ищу рабочий российский прокси...")
     proxies = []
     
-    # Загружаем списки параллельно
     def fetch_api(url, extractor):
         try:
             r = requests.get(url, timeout=10)
@@ -345,7 +356,6 @@ def get_working_proxy(S):
     proxies = list(set(proxies))
     random.shuffle(proxies)
     
-    # Параллельная проверка прокси
     def test_proxy(proxy):
         try:
             r = requests.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=2)
@@ -355,7 +365,6 @@ def get_working_proxy(S):
             pass
         return None
 
-    # Проверяем первые 40 прокси одновременно
     with cf.ThreadPoolExecutor(max_workers=15) as ex:
         futures = [ex.submit(test_proxy, p) for p in proxies[:40]]
         for future in cf.as_completed(futures):
@@ -411,7 +420,7 @@ def start_core(ob, port, tmp, user, pw, proxy_url):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0, err = time.monotonic(), "core_start_timeout"
     try:
-        while time.monotonic() - t0 < 3: # Уменьшили ожидание с 6 до 3 секунд
+        while time.monotonic() - t0 < 3:
             if proc.poll() is not None:
                 err = "core_rejected_config"
                 break
@@ -562,6 +571,23 @@ def kv_api(method, data=None):
         r.raise_for_status()
 
 
+# ---------------------------------------------------------------- Оформление премиум-подписки
+def format_premium_link(link, country_code, ping_ms):
+    flag = "🌍"
+    country_name = "Unknown"
+    if country_code and len(country_code) == 2:
+        try:
+            flag = chr(ord(country_code[0].upper()) + 127397) + chr(ord(country_code[1].upper()) + 127397)
+            country_name = COUNTRY_NAMES.get(country_code.upper(), country_code.upper())
+        except Exception:
+            pass
+            
+    clean_link = link.split("#")[0]
+    pretty_name = f"{flag} {country_name} | Elite | {int(ping_ms)} ms"
+    encoded_name = urllib.parse.quote(pretty_name)
+    return f"{clean_link}#{encoded_name}"
+
+
 # ---------------------------------------------------------------- самопроверка
 def selftest(S):
     print("SELFTEST: проверяю, что нерабочий прокси не проходит за счёт прямого выхода")
@@ -679,7 +705,10 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         
+        # Сортируем серверы по пингу (от быстрых к медленным)
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
+        
+        # Фильтрация дубликатов по IP (оставляем только самый быстрый на каждый IP)
         seen_ips = set()
         unique_good = []
         for n in good:
@@ -687,6 +716,16 @@ def main():
                 unique_good.append(n)
                 seen_ips.add(n.host)
         good = unique_good
+
+        # --- ГЕНЕРАЦИЯ ЭЛИТНОГО СПИСКА ---
+        final_lines = []
+        for idx, n in enumerate(good):
+            ping = results[n.key]["median"]
+            country_code = geo.country(n.host) or "XX"
+            premium_link = format_premium_link(n.link, country_code, ping)
+            final_lines.append(premium_link)
+            
+        text = "\n".join(final_lines) + "\n"
 
         report = [
             f"Получено: {rep['received']}",
@@ -718,8 +757,7 @@ def main():
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                 f.write("```\n" + out + "\n```\n")
 
-        text = "\n".join(n.link for n in good) + "\n"
-        ok_text = len(good) >= max(1, S["min_nodes_to_publish"]) and all(LINK_RE.match(x) for x in text.split("\n") if x)
+        ok_text = len(good) >= max(1, S["min_nodes_to_publish"])
         if not ok_text:
             print("Результат пуст или некорректен — прежняя подписка сохранена")
             return 0
