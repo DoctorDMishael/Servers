@@ -41,7 +41,7 @@ class Unsupported(Exception):
 
 # ---------------------------------------------------------------- настройки
 DEFAULTS = {
-    "timeout_sec": 8, "attempts": 3, "min_success_attempts": 2, "max_concurrency": 5,
+    "timeout_sec": 8, "attempts": 3, "min_success_attempts": 2, "max_concurrency": 30,
     "min_targets_ok": 1, "targets": [], "blocked_protocols": [], "blocked_countries": ["RU"],
     "global_deadline_sec": 240, "min_nodes_to_publish": 1, "shrink_threshold": 0.5,
     "shrink_retries": 1, "fetch_timeout_sec": 20, "max_source_bytes": 20000000,
@@ -311,7 +311,7 @@ def resolve_all(hosts):
             return h, sorted({ai[4][0].split("%")[0] for ai in socket.getaddrinfo(h, None, type=socket.SOCK_STREAM)})
         except Exception:
             return h, []
-    with cf.ThreadPoolExecutor(16) as ex:
+    with cf.ThreadPoolExecutor(32) as ex: # Увеличили с 16 до 32
         return dict(ex.map(one, hosts))
 
 
@@ -323,43 +323,47 @@ def get_working_proxy(S):
     print("Ищу рабочий российский прокси...")
     proxies = []
     
-    # Proxora
-    try:
-        r = requests.get("https://api.proxora.io/api/tools/free-proxies?country=ru&protocol=socks5", timeout=10)
-        for p in r.json().get("data", []):
-            proxies.append(f"socks5://{p['ip']}:{p['port']}")
-    except Exception:
-        pass
-        
-    # ProxyScrape SOCKS5
-    try:
-        r = requests.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=socks5&format=json", timeout=10)
-        for p in r.json().get("proxies", []):
-            proxies.append(f"socks5://{p['ip']}:{p['port']}")
-    except Exception:
-        pass
-        
-    # ProxyScrape HTTP
-    try:
-        r = requests.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=http&format=json", timeout=10)
-        for p in r.json().get("proxies", []):
-            proxies.append(f"http://{p['ip']}:{p['port']}")
-    except Exception:
-        pass
+    # Загружаем списки параллельно
+    def fetch_api(url, extractor):
+        try:
+            r = requests.get(url, timeout=10)
+            for p in extractor(r.json()):
+                proxies.append(p)
+        except Exception:
+            pass
+
+    apis = [
+        ("https://api.proxora.io/api/tools/free-proxies?country=ru&protocol=socks5", lambda j: [f"socks5://{p['ip']}:{p['port']}" for p in j.get("data", [])]),
+        ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=socks5&format=json", lambda j: [f"socks5://{p['ip']}:{p['port']}" for p in j.get("proxies", [])]),
+        ("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=http&format=json", lambda j: [f"http://{p['ip']}:{p['port']}" for p in j.get("proxies", [])])
+    ]
+    
+    with cf.ThreadPoolExecutor(3) as ex:
+        for url, ex_func in apis:
+            ex.submit(fetch_api, url, ex_func)
 
     proxies = list(set(proxies))
     random.shuffle(proxies)
     
-    # Проверяем до 30 прокси, чтобы не тратить много времени
-    for proxy in proxies[:30]:
+    # Параллельная проверка прокси
+    def test_proxy(proxy):
         try:
-            r = requests.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=3)
+            r = requests.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=2)
             if r.status_code == 200:
-                print(f"  Найден рабочий прокси: {proxy}")
                 return proxy
         except Exception:
             pass
-            
+        return None
+
+    # Проверяем первые 40 прокси одновременно
+    with cf.ThreadPoolExecutor(max_workers=15) as ex:
+        futures = [ex.submit(test_proxy, p) for p in proxies[:40]]
+        for future in cf.as_completed(futures):
+            res = future.result()
+            if res:
+                print(f"  Найден рабочий прокси: {res}")
+                return res
+                
     print("  Не удалось найти рабочий прокси (будет прямая проверка).")
     return None
 
@@ -407,7 +411,7 @@ def start_core(ob, port, tmp, user, pw, proxy_url):
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0, err = time.monotonic(), "core_start_timeout"
     try:
-        while time.monotonic() - t0 < 6:
+        while time.monotonic() - t0 < 3: # Уменьшили ожидание с 6 до 3 секунд
             if proc.poll() is not None:
                 err = "core_rejected_config"
                 break
