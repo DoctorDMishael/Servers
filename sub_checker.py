@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Сборка и реальная проверка VPN-подписок через sing-box.
-Секреты читаются только из переменных окружения и никогда не выводятся."""
+"""Сборка и реальная проверка VPN-подписок через sing-box."""
 import argparse
 import base64
 import concurrent.futures as cf
@@ -23,7 +22,7 @@ import threading
 import time
 from collections import Counter, namedtuple
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlparse
 
 import maxminddb
 import requests
@@ -45,7 +44,8 @@ DEFAULTS = {
     "timeout_sec": 8, "attempts": 3, "min_success_attempts": 2, "max_concurrency": 5,
     "min_targets_ok": 1, "targets": [], "blocked_protocols": [], "blocked_countries": ["RU"],
     "global_deadline_sec": 240, "min_nodes_to_publish": 1, "shrink_threshold": 0.5,
-    "shrink_retries": 1, "fetch_timeout_sec": 20, "max_source_bytes": 20000000
+    "shrink_retries": 1, "fetch_timeout_sec": 20, "max_source_bytes": 20000000,
+    "use_proxy": True
 }
 
 
@@ -315,24 +315,94 @@ def resolve_all(hosts):
         return dict(ex.map(one, hosts))
 
 
+# ---------------------------------------------------------------- Получение бесплатных прокси
+def get_working_proxy(S):
+    if not S.get("use_proxy"):
+        return None
+        
+    print("Ищу рабочий российский прокси...")
+    proxies = []
+    
+    # Proxora
+    try:
+        r = requests.get("https://api.proxora.io/api/tools/free-proxies?country=ru&protocol=socks5", timeout=10)
+        for p in r.json().get("data", []):
+            proxies.append(f"socks5://{p['ip']}:{p['port']}")
+    except Exception:
+        pass
+        
+    # ProxyScrape SOCKS5
+    try:
+        r = requests.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=socks5&format=json", timeout=10)
+        for p in r.json().get("proxies", []):
+            proxies.append(f"socks5://{p['ip']}:{p['port']}")
+    except Exception:
+        pass
+        
+    # ProxyScrape HTTP
+    try:
+        r = requests.get("https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&country=ru&protocol=http&format=json", timeout=10)
+        for p in r.json().get("proxies", []):
+            proxies.append(f"http://{p['ip']}:{p['port']}")
+    except Exception:
+        pass
+
+    proxies = list(set(proxies))
+    random.shuffle(proxies)
+    
+    # Проверяем до 30 прокси, чтобы не тратить много времени
+    for proxy in proxies[:30]:
+        try:
+            r = requests.get("https://api.ipify.org?format=json", proxies={"http": proxy, "https": proxy}, timeout=3)
+            if r.status_code == 200:
+                print(f"  Найден рабочий прокси: {proxy}")
+                return proxy
+        except Exception:
+            pass
+            
+    print("  Не удалось найти рабочий прокси (будет прямая проверка).")
+    return None
+
+
 # ---------------------------------------------------------------- ядро и проверка
-def core_config(ob, port, user, pw):
+def core_config(ob, port, user, pw, proxy_url):
+    outbounds = []
+    
+    if proxy_url:
+        u = urlparse(proxy_url)
+        outbound_type = "socks" if u.scheme.startswith("socks") else "http"
+        
+        relay_ob = {
+            "type": outbound_type,
+            "tag": "relay",
+            "server": u.hostname,
+            "server_port": u.port
+        }
+        outbounds.append(relay_ob)
+        
+        target_ob = dict(ob)
+        target_ob["detour"] = "relay"
+    else:
+        target_ob = dict(ob)
+
+    outbounds.append(dict(target_ob, tag="out", domain_resolver="local"))
+
     return {
         "log": {"level": "fatal"},
         "dns": {"servers": [{"type": "local", "tag": "local"}]},
         "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": port,
                       "users": [{"username": user, "password": pw}]}],
-        "outbounds": [dict(ob, tag="out", domain_resolver="local")],
+        "outbounds": outbounds,
         "route": {"rules": [{"inbound": ["in"], "action": "route", "outbound": "out"}, {"action": "reject"}],
                   "final": "out", "default_domain_resolver": "local"},
     }
 
 
-def start_core(ob, port, tmp, user, pw):
+def start_core(ob, port, tmp, user, pw, proxy_url):
     cfg = os.path.join(tmp, f"c{port}.json")
     fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump(core_config(ob, port, user, pw), f)
+        json.dump(core_config(ob, port, user, pw, proxy_url), f)
     proc = subprocess.Popen([SINGBOX, "run", "-c", cfg], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0, err = time.monotonic(), "core_start_timeout"
@@ -405,15 +475,16 @@ def direct_ip(S):
 
 
 class Ctx:
-    def __init__(self, S, geo, direct, tmp, deadline):
+    def __init__(self, S, geo, direct, tmp, deadline, proxy):
         self.S, self.geo, self.direct, self.tmp, self.deadline = S, geo, direct, tmp, deadline
+        self.proxy = proxy
         self.user, self.pw = secrets.token_hex(8), secrets.token_hex(16)
         self.target_ok, self.lock = Counter(), threading.Lock()
 
 
 def check_node(n, port, ctx):
     S = ctx.S
-    proc, err = start_core(n.ob, port, ctx.tmp, ctx.user, ctx.pw)
+    proc, err = start_core(n.ob, port, ctx.tmp, ctx.user, ctx.pw, ctx.proxy)
     if err:
         return {"status": "core_rejected", "why": err}
     proxy = f"socks5h://{ctx.user}:{ctx.pw}@127.0.0.1:{port}"
@@ -497,7 +568,7 @@ def selftest(S):
     tmp = tempfile.mkdtemp()
     try:
         geo = load_geo(tmp)
-        ctx = Ctx(S, geo, d, tmp, time.monotonic() + 300)
+        ctx = Ctx(S, geo, d, tmp, time.monotonic() + 300, None)
         bad = [{"type": "shadowsocks", "server": "127.0.0.1", "server_port": 9, "method": "aes-256-gcm", "password": "x"},
                {"type": "shadowsocks", "server": "192.0.2.1", "server_port": 8388, "method": "aes-256-gcm", "password": "x"}]
         ok = True
@@ -531,6 +602,7 @@ def main():
     if not urls:
         print("Нет ссылок в SUBSCRIPTION_URLS")
         return 1
+        
     tmp = tempfile.mkdtemp()
     try:
         prev_lines = []
@@ -542,6 +614,8 @@ def main():
                 prev_keys.add(parse_link(ln).key)
             except Unsupported:
                 pass
+
+        working_proxy = get_working_proxy(S)
 
         lines, src_errs = fetch_sources(urls, S)
         rep = Counter(received=len(lines))
@@ -582,7 +656,8 @@ def main():
         d = direct_ip(S)
         if not d:
             print("Предупреждение: не удалось получить прямой IP раннера, защита отключена")
-        ctx = Ctx(S, geo, d, tmp, deadline)
+            
+        ctx = Ctx(S, geo, d, tmp, deadline, working_proxy)
         results = run_checks(nodes, ctx)
 
         def passed():
@@ -600,7 +675,6 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         
-        # Фильтрация дубликатов по IP
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
         seen_ips = set()
         unique_good = []
@@ -625,9 +699,15 @@ def main():
         details = [f"  не поддерживается — {k}: {v}" for k, v in sorted(unsupported.items())]
         details += [f"  {k}" for k in src_errs]
         
+        if working_proxy:
+            details.append(f"  Проверка выполнена через прокси: {working_proxy}")
+        else:
+            details.append("  ВНИМАНИЕ: проверка выполнена напрямую (прокси не найден)")
+
         for t in S["targets"]:
             if nodes and ctx.target_ok[t["name"]] == 0 and any(r["status"] != "not_checked" for r in results.values()):
                 details.append(f"  ВНИМАНИЕ: контрольный адрес «{t['name']}» не ответил ни разу")
+                
         out = "\n".join(report + details)
         print(out)
         if os.environ.get("GITHUB_STEP_SUMMARY"):
