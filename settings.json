@@ -2,7 +2,7 @@
   "timeout_sec": 8,
   "attempts": 3,
   "min_success_attempts": 2,
-  "max_concurrency": 15,
+  "max_concurrency": 30,
   "min_targets_ok": 1,
   "targets": [
     {"name": "cloudflare", "url": "https://www.cloudflare.com/cdn-cgi/trace", "parser": "trace"},
