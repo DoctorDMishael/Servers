@@ -572,7 +572,7 @@ def kv_api(method, data=None):
 
 
 # ---------------------------------------------------------------- Оформление премиум-подписки
-def format_premium_link(link, country_code, ping_ms):
+def format_premium_link(link, country_code):
     flag = "🌍"
     country_name = "Unknown"
     if country_code and len(country_code) == 2:
@@ -583,7 +583,8 @@ def format_premium_link(link, country_code, ping_ms):
             pass
             
     clean_link = link.split("#")[0]
-    pretty_name = f"{flag} {country_name} | Elite | {int(ping_ms)} ms"
+    # Убрали отображение пинга, оставили только страну и метку Elite
+    pretty_name = f"{flag} {country_name} | Elite"
     encoded_name = urllib.parse.quote(pretty_name)
     return f"{clean_link}#{encoded_name}"
 
@@ -705,7 +706,7 @@ def main():
 
         st = Counter(r["status"] for r in results.values())
         
-        # Сортируем серверы по пингу (от быстрых к медленным)
+        # Сортировка по пингу (от лучшего к худшему) для РФ
         good = sorted(passed(), key=lambda n: results[n.key]["median"])
         
         # Фильтрация дубликатов по IP (оставляем только самый быстрый на каждый IP)
@@ -717,12 +718,11 @@ def main():
                 seen_ips.add(n.host)
         good = unique_good
 
-        # --- ГЕНЕРАЦИЯ ЭЛИТНОГО СПИСКА ---
+        # --- ГЕНЕРАЦИЯ ЭЛИТНОГО СПИСКА (БЕЗ ПИНГА) ---
         final_lines = []
         for idx, n in enumerate(good):
-            ping = results[n.key]["median"]
             country_code = geo.country(n.host) or "XX"
-            premium_link = format_premium_link(n.link, country_code, ping)
+            premium_link = format_premium_link(n.link, country_code)
             final_lines.append(premium_link)
             
         text = "\n".join(final_lines) + "\n"
